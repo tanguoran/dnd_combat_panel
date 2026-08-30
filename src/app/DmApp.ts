@@ -2,6 +2,7 @@ import { Camera } from '../core/Camera'
 import { SceneStore } from '../core/SceneStore'
 import { WindowBridge } from '../core/WindowBridge'
 import { addSceneObject, allSceneObjects, cloneSceneObjects, removeSceneObjects, sceneObjectsInRect, translateSceneObject } from '../core/sceneObjects'
+import { describeTouchPair, touchTransform, type TouchPair } from '../core/touchGesture'
 import { distanceToSegment } from '../geometry/visibility'
 import { createDefaultScene, createImageLayer, createLight, createToken, createWall, findSceneObject, makeId } from '../model/scene'
 import type { SceneObject, SceneState, ToolName, Vec2 } from '../model/types'
@@ -20,6 +21,21 @@ interface DragState {
   startWorld: Vec2
   lastScreen: Vec2
   lastWorld: Vec2
+}
+
+interface PendingTouch {
+  pointerId: number
+  startScreen: Vec2
+  startWorld: Vec2
+  additive: boolean
+  moved: boolean
+  interactionStarted: boolean
+}
+
+interface TouchGestureState {
+  pointerIds: [number, number]
+  last: TouchPair
+  moved: boolean
 }
 
 interface SceneExport {
@@ -69,6 +85,11 @@ export class DmApp {
   private wallStart: Vec2 | null = null
   private wallPointer: Vec2 | null = null
   private drag: DragState | null = null
+  private pendingTouch: PendingTouch | null = null
+  private touchGesture: TouchGestureState | null = null
+  private readonly touchPoints = new Map<number, Vec2>()
+  private readonly ignoredTouchPointers = new Set<number>()
+  private readonly touchInterface = navigator.maxTouchPoints > 0 || window.matchMedia('(pointer: coarse)').matches
   private clipboard: SceneObject[] = []
   private clipboardWasCut = false
   private pasteGeneration = 0
@@ -223,8 +244,14 @@ export class DmApp {
   }
 
   private onPointerDown(event: PointerEvent): void {
-    this.stage.focus()
+    this.stage.focus({ preventScroll: true })
     const screen = screenPoint(event, this.stage)
+
+    if (event.pointerType === 'touch') {
+      this.onTouchPointerDown(event, screen)
+      return
+    }
+
     const world = this.snap(this.camera.screenToWorld(screen), event.ctrlKey)
     if (event.button === 1 || event.button === 2) {
       event.preventDefault()
@@ -243,6 +270,16 @@ export class DmApp {
       return
     }
     if (event.button !== 0) return
+    this.beginPrimaryInteraction(screen, world, event.shiftKey, event.pointerId, false)
+  }
+
+  private beginPrimaryInteraction(
+    screen: Vec2,
+    world: Vec2,
+    additive: boolean,
+    pointerId: number,
+    touch: boolean,
+  ): void {
     if (this.tool === 'wall') {
       if (!this.wallStart) this.wallStart = world
       else {
@@ -269,26 +306,26 @@ export class DmApp {
       return
     }
     if (this.tool !== 'select') return
-    const hit = this.hitTest(world)
+    const hit = this.hitTest(world, touch ? 24 : 12)
     if (hit?.kind === 'image' && !this.selectedIds.has(hit.id)) {
-      if (!event.shiftKey) this.clearSelection()
+      if (!additive) this.clearSelection()
       this.drag = {
         type: 'marquee',
         pendingId: hit.id,
-        button: event.button,
-        additive: event.shiftKey,
+        button: 0,
+        additive,
         moved: false,
         startScreen: screen,
         startWorld: world,
         lastScreen: screen,
         lastWorld: world,
       }
-      this.stage.setPointerCapture(event.pointerId)
+      if (!this.stage.hasPointerCapture(pointerId)) this.stage.setPointerCapture(pointerId)
       this.render()
       return
     }
     if (hit) {
-      if (event.shiftKey) this.toggleSelection(hit.id)
+      if (additive) this.toggleSelection(hit.id)
       else if (!this.selectedIds.has(hit.id)) this.selectOnly(hit.id)
       else this.primarySelectedId = hit.id
 
@@ -300,35 +337,111 @@ export class DmApp {
         this.drag = {
           type: 'object',
           ids: movableIds,
-          button: event.button,
-          additive: event.shiftKey,
+          button: 0,
+          additive,
           moved: false,
           startScreen: screen,
           startWorld: world,
           lastScreen: screen,
           lastWorld: world,
         }
-        this.stage.setPointerCapture(event.pointerId)
+        if (!this.stage.hasPointerCapture(pointerId)) this.stage.setPointerCapture(pointerId)
       }
     } else {
-      if (!event.shiftKey) this.clearSelection()
+      if (!additive) this.clearSelection()
       this.drag = {
         type: 'marquee',
-        button: event.button,
-        additive: event.shiftKey,
+        button: 0,
+        additive,
         moved: false,
         startScreen: screen,
         startWorld: world,
         lastScreen: screen,
         lastWorld: world,
       }
-      this.stage.setPointerCapture(event.pointerId)
+      if (!this.stage.hasPointerCapture(pointerId)) this.stage.setPointerCapture(pointerId)
     }
+    this.render()
+  }
+
+  private onTouchPointerDown(event: PointerEvent, screen: Vec2): void {
+    event.preventDefault()
+    this.ignoredTouchPointers.delete(event.pointerId)
+    this.touchPoints.set(event.pointerId, screen)
+    if (!this.stage.hasPointerCapture(event.pointerId)) this.stage.setPointerCapture(event.pointerId)
+
+    if (this.touchPoints.size === 1) {
+      this.pendingTouch = {
+        pointerId: event.pointerId,
+        startScreen: screen,
+        startWorld: this.camera.screenToWorld(screen),
+        additive: event.shiftKey,
+        moved: false,
+        interactionStarted: false,
+      }
+      return
+    }
+
+    if (this.touchGesture) {
+      this.touchPoints.delete(event.pointerId)
+      this.ignoredTouchPointers.add(event.pointerId)
+      return
+    }
+
+    const pair = [...this.touchPoints.entries()].slice(0, 2)
+    const first = pair[0]
+    const second = pair[1]
+    if (!first || !second) return
+    this.pendingTouch = null
+    this.drag = null
+    this.touchGesture = {
+      pointerIds: [first[0], second[0]],
+      last: describeTouchPair(first[1], second[1]),
+      moved: false,
+    }
+    this.stage.classList.add('panning')
     this.render()
   }
 
   private onPointerMove(event: PointerEvent): void {
     const screen = screenPoint(event, this.stage)
+
+    if (event.pointerType === 'touch') {
+      event.preventDefault()
+      if (this.ignoredTouchPointers.has(event.pointerId)) return
+      if (!this.touchPoints.has(event.pointerId)) return
+      this.touchPoints.set(event.pointerId, screen)
+
+      if (this.touchGesture) {
+        const [firstId, secondId] = this.touchGesture.pointerIds
+        const first = this.touchPoints.get(firstId)
+        const second = this.touchPoints.get(secondId)
+        if (!first || !second) return
+        const current = describeTouchPair(first, second)
+        const transform = touchTransform(this.touchGesture.last, current)
+        if (Math.hypot(transform.pan.x, transform.pan.y) > 1 || Math.abs(Math.log(transform.zoomFactor)) > 0.006) {
+          this.touchGesture.moved = true
+        }
+        this.camera.panByScreen(transform.pan)
+        this.camera.zoomAt(current.center, transform.zoomFactor)
+        this.touchGesture.last = current
+        this.render()
+        this.bridge.sendSnapshot(this.store.scene, this.camera.snapshot)
+        return
+      }
+
+      const pending = this.pendingTouch
+      if (!pending || pending.pointerId !== event.pointerId) return
+      if (Math.hypot(screen.x - pending.startScreen.x, screen.y - pending.startScreen.y) > 7) {
+        pending.moved = true
+        if (!pending.interactionStarted && this.tool === 'select') {
+          pending.interactionStarted = true
+          this.beginPrimaryInteraction(pending.startScreen, pending.startWorld, pending.additive, pending.pointerId, true)
+        }
+      }
+      if (!pending.interactionStarted) return
+    }
+
     const world = this.snap(this.camera.screenToWorld(screen), event.ctrlKey)
     if (this.tool === 'wall' && this.wallStart) {
       this.wallPointer = world
@@ -364,6 +477,50 @@ export class DmApp {
   }
 
   private onPointerUp(event: PointerEvent): void {
+    if (event.pointerType === 'touch') {
+      event.preventDefault()
+      if (this.ignoredTouchPointers.has(event.pointerId)) {
+        this.ignoredTouchPointers.delete(event.pointerId)
+        this.touchPoints.delete(event.pointerId)
+        if (this.stage.hasPointerCapture(event.pointerId)) this.stage.releasePointerCapture(event.pointerId)
+        return
+      }
+
+      if (this.touchGesture?.pointerIds.includes(event.pointerId)) {
+        const finishWallWithTwoFingerTap = event.type !== 'pointercancel' && !this.touchGesture.moved && this.tool === 'wall'
+        for (const pointerId of this.touchPoints.keys()) {
+          if (pointerId !== event.pointerId) this.ignoredTouchPointers.add(pointerId)
+        }
+        this.touchPoints.clear()
+        this.pendingTouch = null
+        this.touchGesture = null
+        this.drag = null
+        this.stage.classList.remove('panning')
+        if (this.stage.hasPointerCapture(event.pointerId)) this.stage.releasePointerCapture(event.pointerId)
+        if (finishWallWithTwoFingerTap) this.finishWall()
+        else this.render()
+        return
+      }
+
+      const pending = this.pendingTouch
+      this.touchPoints.delete(event.pointerId)
+      if (!pending || pending.pointerId !== event.pointerId) {
+        if (this.stage.hasPointerCapture(event.pointerId)) this.stage.releasePointerCapture(event.pointerId)
+        return
+      }
+      this.pendingTouch = null
+      if (event.type === 'pointercancel') {
+        this.drag = null
+        this.stage.classList.remove('panning')
+        if (this.stage.hasPointerCapture(event.pointerId)) this.stage.releasePointerCapture(event.pointerId)
+        this.render()
+        return
+      }
+      if (!pending.interactionStarted && !pending.moved) {
+        this.beginPrimaryInteraction(pending.startScreen, pending.startWorld, pending.additive, pending.pointerId, true)
+      }
+    }
+
     const completed = this.drag
     if (this.stage.hasPointerCapture(event.pointerId)) this.stage.releasePointerCapture(event.pointerId)
     this.drag = null
@@ -447,17 +604,23 @@ export class DmApp {
       this.root.querySelectorAll<HTMLElement>('[data-tool]').forEach((button) => button.classList.toggle('active', button.dataset.tool === 'select'))
       this.stage.dataset.tool = 'select'
     }
-    const messages: Record<ToolName, string> = {
+    const messages: Record<ToolName, string> = this.touchInterface ? {
+      select: '单指选择、拖动或框选',
+      wall: '单指轻点连续绘制 · 双指轻点结束',
+      token: '单指轻点放置 Token', light: '单指轻点放置光源', image: '选择图片',
+    } : {
       select: '拖动或框选 · Shift 追加 · Ctrl+C/X/V · Delete 删除',
       wall: '左键连续绘制 · Ctrl 吸附格点 · 右键单击结束',
       token: '点击战场放置 Token', light: '点击放置光源 · Shift + 滚轮调整半径', image: '选择图片',
     }
     const hint = this.root.querySelector<HTMLElement>('#hint')
-    if (hint) hint.innerHTML = `<span>${messages[tool]}</span><span>右键拖动平移</span><span>滚轮缩放</span>`
+    if (hint) hint.innerHTML = this.touchInterface
+      ? `<span>${messages[tool]}</span><span>双指拖动平移</span><span>双指捏合缩放</span>`
+      : `<span>${messages[tool]}</span><span>右键拖动平移</span><span>滚轮缩放</span>`
   }
 
-  private hitTest(point: Vec2): SceneObject | undefined {
-    const tolerance = 12 / this.camera.snapshot.zoom
+  private hitTest(point: Vec2, tolerancePixels = 12): SceneObject | undefined {
+    const tolerance = tolerancePixels / this.camera.snapshot.zoom
     for (const token of [...this.store.scene.tokens].reverse()) if (Math.hypot(point.x - token.x, point.y - token.y) <= token.radius + tolerance) return token
     for (const light of [...this.store.scene.lights].reverse()) if (Math.hypot(point.x - light.x, point.y - light.y) <= 22 + tolerance) return light
     for (const wall of [...this.store.scene.walls].reverse()) if (distanceToSegment(point, wall.a, wall.b) <= tolerance) return wall
