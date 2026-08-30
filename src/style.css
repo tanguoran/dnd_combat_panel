@@ -115,7 +115,9 @@ kbd { margin-left: 7px; opacity: .55; font-size: 10px; }
 
 html[data-mode="player"], html[data-mode="player"] body, html[data-mode="player"] #app { width: 100%; height: 100%; min-width: 0; background: #030504; }
 .player-workspace, .player-stage { width: 100%; height: 100%; overflow: hidden; }
-.player-stage { outline: none; touch-action: none; overscroll-behavior: none; }
+.player-stage { outline: none; touch-action: none; overscroll-behavior: none; cursor: grab; }
+.player-stage.panning { cursor: grabbing; }
+.player-stage.dragging-token { cursor: move; }
 .player-status { position: fixed; left: 18px; top: 18px; z-index: 3; padding: 9px 12px; border: 1px solid #333a35; border-radius: 8px; color: #8b958d; background: rgba(12, 15, 13, .88); font-size: 11px; letter-spacing: .08em; transition: opacity .35s ease; }
 .player-status span { display: inline-block; width: 6px; height: 6px; margin-right: 7px; border-radius: 50%; background: #b98a67; }
 .player-status.connected span { background: #8fb77c; box-shadow: 0 0 8px #8fb77c; }

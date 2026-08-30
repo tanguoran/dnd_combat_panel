@@ -13,6 +13,7 @@ import {
 } from '../core/initiative'
 import { addSceneObject, allSceneObjects, cloneSceneObjects, removeSceneObjects, sceneObjectsInRect, translateSceneObject } from '../core/sceneObjects'
 import { describeTouchPair, touchTransform, type TouchPair } from '../core/touchGesture'
+import { moveCircleWithoutCrossingWalls } from '../geometry/movement'
 import { distanceToSegment } from '../geometry/visibility'
 import { createDefaultScene, createImageLayer, createLight, createToken, createWall, findSceneObject, makeId } from '../model/scene'
 import type { SceneObject, SceneState, ToolName, Vec2 } from '../model/types'
@@ -138,6 +139,7 @@ export class DmApp {
       this.saveTimer = window.setTimeout(() => void this.database.saveScene(next), 250)
     })
     this.bridge.onPlayerReady(() => this.bridge.sendSnapshot(this.store.scene, this.camera.snapshot))
+    this.bridge.onTokenMoveRequest((tokenId, position) => this.applyPlayerTokenMove(tokenId, position))
     this.setTool('select')
   }
 
@@ -156,6 +158,31 @@ export class DmApp {
       previewVision: this.previewVision,
     })
     renderInspector(this.inspector, scene, this.selectedIds, selected, this.inspectorPanel)
+  }
+
+  private applyPlayerTokenMove(tokenId: string, desired: Vec2): void {
+    if (!Number.isFinite(desired.x) || !Number.isFinite(desired.y)) return
+    const scene = this.store.scene
+    const token = scene.tokens.find((item) => item.id === tokenId)
+    if (!token?.visibleToPlayers || !token.visionSource) return
+
+    const clampAxis = (value: number, size: number): number => {
+      if (size <= token.radius * 2) return size / 2
+      return Math.min(size - token.radius, Math.max(token.radius, value))
+    }
+    const bounded = {
+      x: clampAxis(desired.x, scene.width),
+      y: clampAxis(desired.y, scene.height),
+    }
+    const position = moveCircleWithoutCrossingWalls(token, bounded, token.radius, scene.walls)
+    if (Math.hypot(position.x - token.x, position.y - token.y) < 0.01) return
+
+    this.store.update((next) => {
+      const current = next.tokens.find((item) => item.id === tokenId)
+      if (!current?.visibleToPlayers || !current.visionSource) return
+      current.x = position.x
+      current.y = position.y
+    })
   }
 
   private bindEvents(): void {

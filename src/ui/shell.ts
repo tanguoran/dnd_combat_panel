@@ -40,7 +40,7 @@ export const renderPlayerShell = (root: HTMLElement): void => {
     <main class="player-workspace">
       <div class="player-stage" id="stage" tabindex="0" aria-label="玩家战斗画面"></div>
       <div class="player-status" id="player-status"><span></span>等待 DM 画面</div>
-      <div class="player-help">按 F 进入全屏</div>
+      <div class="player-help">拖动画面 · 滚轮/双指缩放 · 拖动可见的视野 Token · F 全屏</div>
     </main>`
 }
 
