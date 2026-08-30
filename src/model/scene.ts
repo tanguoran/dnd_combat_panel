@@ -14,6 +14,7 @@ export const createDefaultScene = (): SceneState => ({
   tokens: [],
   walls: [],
   lights: [],
+  initiative: { status: 'setup', round: 1, activeTokenId: null, entries: [] },
   updatedAt: Date.now(),
 })
 

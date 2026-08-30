@@ -1,6 +1,16 @@
 import { Camera } from '../core/Camera'
 import { SceneStore } from '../core/SceneStore'
 import { WindowBridge } from '../core/WindowBridge'
+import {
+  addTokensToInitiative,
+  advanceInitiative,
+  clearInitiative,
+  normalizeInitiative,
+  removeFromInitiative,
+  reorderInitiative,
+  setInitiativeScore,
+  startInitiative,
+} from '../core/initiative'
 import { addSceneObject, allSceneObjects, cloneSceneObjects, removeSceneObjects, sceneObjectsInRect, translateSceneObject } from '../core/sceneObjects'
 import { describeTouchPair, touchTransform, type TouchPair } from '../core/touchGesture'
 import { distanceToSegment } from '../geometry/visibility'
@@ -8,7 +18,7 @@ import { createDefaultScene, createImageLayer, createLight, createToken, createW
 import type { SceneObject, SceneState, ToolName, Vec2 } from '../model/types'
 import { SceneRenderer } from '../render/SceneRenderer'
 import { BattleBoardDatabase, type ExportedAsset } from '../storage/BattleBoardDatabase'
-import { renderDmShell, renderInspector } from '../ui/shell'
+import { renderDmShell, renderInspector, type InspectorPanel } from '../ui/shell'
 
 interface DragState {
   type: 'object' | 'camera' | 'marquee'
@@ -35,6 +45,15 @@ interface PendingTouch {
 interface TouchGestureState {
   pointerIds: [number, number]
   last: TouchPair
+  moved: boolean
+}
+
+interface InitiativeDragState {
+  pointerId: number
+  tokenId: string
+  scoreKey: string
+  handle: HTMLElement
+  row: HTMLElement
   moved: boolean
 }
 
@@ -90,6 +109,8 @@ export class DmApp {
   private readonly touchPoints = new Map<number, Vec2>()
   private readonly ignoredTouchPointers = new Set<number>()
   private readonly touchInterface = navigator.maxTouchPoints > 0 || window.matchMedia('(pointer: coarse)').matches
+  private inspectorPanel: InspectorPanel = 'properties'
+  private initiativeDrag: InitiativeDragState | null = null
   private clipboard: SceneObject[] = []
   private clipboardWasCut = false
   private pasteGeneration = 0
@@ -106,6 +127,7 @@ export class DmApp {
     this.stage = this.root.querySelector<HTMLElement>('#stage')!
     this.inspector = this.root.querySelector<HTMLElement>('#inspector')!
     const scene = (await this.database.loadScene()) ?? createDefaultScene()
+    normalizeInitiative(scene)
     this.store = new SceneStore(scene)
     this.renderer = await SceneRenderer.create(this.stage, 'dm', (id) => this.database.getAssetBlob(id))
     this.bindEvents()
@@ -130,9 +152,10 @@ export class DmApp {
       selectedIds: [...this.selectedIds],
       wallDraft: this.wallStart && this.wallPointer ? { start: this.wallStart, end: this.wallPointer } : null,
       selectionBox: this.drag?.type === 'marquee' ? { start: this.drag.startWorld, end: this.drag.lastWorld } : null,
+      activeTokenId: scene.initiative?.status === 'running' ? scene.initiative.activeTokenId : null,
       previewVision: this.previewVision,
     })
-    renderInspector(this.inspector, scene, this.selectedIds, selected)
+    renderInspector(this.inspector, scene, this.selectedIds, selected, this.inspectorPanel)
   }
 
   private bindEvents(): void {
@@ -168,6 +191,10 @@ export class DmApp {
       const files = [...(event.dataTransfer?.files ?? [])].filter((file) => file.type.startsWith('image/'))
       if (files.length) void this.addImages(files, this.camera.screenToWorld(screenPoint(event as unknown as PointerEvent, this.stage)))
     })
+    this.inspector.addEventListener('pointerdown', (event) => this.onInitiativeDragStart(event))
+    this.inspector.addEventListener('pointermove', (event) => this.onInitiativeDragMove(event))
+    this.inspector.addEventListener('pointerup', (event) => this.onInitiativeDragEnd(event))
+    this.inspector.addEventListener('pointercancel', (event) => this.onInitiativeDragEnd(event))
     window.addEventListener('keydown', (event) => this.onKeyDown(event))
   }
 
@@ -191,6 +218,38 @@ export class DmApp {
     }
 
     switch (target.dataset.action) {
+      case 'panel-properties':
+        this.inspectorPanel = 'properties'
+        this.render()
+        break
+      case 'panel-initiative':
+        this.inspectorPanel = 'initiative'
+        this.render()
+        break
+      case 'initiative-add-selected':
+        this.addSelectedTokensToInitiative()
+        break
+      case 'initiative-start':
+        this.changeInitiativeTurn('start')
+        break
+      case 'initiative-next':
+        this.changeInitiativeTurn('next')
+        break
+      case 'initiative-previous':
+        this.changeInitiativeTurn('previous')
+        break
+      case 'initiative-locate':
+        if (target.dataset.tokenId) this.locateInitiativeToken(target.dataset.tokenId)
+        break
+      case 'initiative-remove':
+        if (target.dataset.tokenId) this.removeInitiativeToken(target.dataset.tokenId)
+        break
+      case 'initiative-clear':
+        if (window.confirm('清空先攻板？地图上的 Token 不会被删除。')) {
+          this.store.update((scene) => clearInitiative(scene))
+          this.showToast('已清空先攻板')
+        }
+        break
       case 'player':
         window.open(`${location.pathname}?mode=player`, 'live-battle-board-player', 'popup')
         break
@@ -221,6 +280,12 @@ export class DmApp {
 
   private onChange(event: Event): void {
     const input = event.target as HTMLInputElement
+    const initiativeTokenId = input.dataset.initiativeScoreInput
+    if (initiativeTokenId) {
+      const value = input.value.trim() === '' ? null : Number(input.value)
+      this.store.update((scene) => setInitiativeScore(scene, initiativeTokenId, value))
+      return
+    }
     if (input.dataset.sceneProperty === 'name') {
       this.store.update((scene) => { scene.name = input.value.trim() || '临时场景' })
       return
@@ -241,6 +306,108 @@ export class DmApp {
       if (property === 'rotationDegrees' && selected.kind === 'image') selected.rotation = (Number(value) * Math.PI) / 180
       else (selected as unknown as Record<string, string | number | boolean>)[property] = value
     })
+  }
+
+  private addSelectedTokensToInitiative(): void {
+    const tokenIds = this.store.scene.tokens.filter((token) => this.selectedIds.has(token.id)).map((token) => token.id)
+    if (tokenIds.length === 0) {
+      this.showToast('请先在地图上选择 Token')
+      return
+    }
+    let added = 0
+    this.store.update((scene) => { added = addTokensToInitiative(scene, tokenIds) })
+    this.inspectorPanel = 'initiative'
+    if (added === 0) this.showToast('所选 Token 已在先攻板中')
+    else this.showToast(`已加入 ${added} 个 Token`)
+  }
+
+  private changeInitiativeTurn(action: 'start' | 'next' | 'previous'): void {
+    let activeTokenId: string | null = null
+    this.store.update((scene) => {
+      if (action === 'start') activeTokenId = startInitiative(scene)
+      if (action === 'next') activeTokenId = advanceInitiative(scene, 1)
+      if (action === 'previous') activeTokenId = advanceInitiative(scene, -1)
+    })
+    if (!activeTokenId) {
+      this.showToast('先攻板中还没有 Token')
+      return
+    }
+    const token = this.store.scene.tokens.find((item) => item.id === activeTokenId)
+    const round = this.store.scene.initiative?.round ?? 1
+    this.showToast(`第 ${round} 轮 · ${token?.name ?? '当前 Token'} 行动`)
+  }
+
+  private removeInitiativeToken(tokenId: string): void {
+    const name = this.store.scene.tokens.find((token) => token.id === tokenId)?.name ?? 'Token'
+    this.store.update((scene) => removeFromInitiative(scene, tokenId))
+    this.showToast(`${name} 已移出先攻板`)
+  }
+
+  private locateInitiativeToken(tokenId: string): void {
+    const token = this.store.scene.tokens.find((item) => item.id === tokenId)
+    if (!token) return
+    this.selectOnly(tokenId)
+    this.setTool('select')
+    const camera = this.camera.snapshot
+    this.camera.set({
+      x: token.x - this.stage.clientWidth / (2 * camera.zoom),
+      y: token.y - this.stage.clientHeight / (2 * camera.zoom),
+      zoom: camera.zoom,
+    })
+    this.render()
+    this.bridge.sendSnapshot(this.store.scene, this.camera.snapshot)
+    this.showToast(`已定位 ${token.name}`)
+  }
+
+  private onInitiativeDragStart(event: PointerEvent): void {
+    if (event.button !== 0) return
+    const handle = (event.target as HTMLElement).closest<HTMLElement>('[data-initiative-drag]')
+    const row = handle?.closest<HTMLElement>('[data-initiative-token-id]')
+    const tokenId = row?.dataset.initiativeTokenId
+    if (!handle || !row || !tokenId) return
+    event.preventDefault()
+    this.initiativeDrag = {
+      pointerId: event.pointerId,
+      tokenId,
+      scoreKey: row.dataset.initiativeScore ?? 'empty',
+      handle,
+      row,
+      moved: false,
+    }
+    row.classList.add('dragging')
+    handle.setAttribute('aria-grabbed', 'true')
+    handle.setPointerCapture(event.pointerId)
+  }
+
+  private onInitiativeDragMove(event: PointerEvent): void {
+    const drag = this.initiativeDrag
+    if (!drag || drag.pointerId !== event.pointerId) return
+    event.preventDefault()
+    const target = document.elementFromPoint(event.clientX, event.clientY)
+    const targetRow = target?.closest<HTMLElement>('[data-initiative-token-id]')
+    if (!targetRow || targetRow === drag.row || targetRow.dataset.initiativeScore !== drag.scoreKey) return
+    const bounds = targetRow.getBoundingClientRect()
+    if (event.clientY < bounds.top + bounds.height / 2) targetRow.before(drag.row)
+    else targetRow.after(drag.row)
+    drag.moved = true
+  }
+
+  private onInitiativeDragEnd(event: PointerEvent): void {
+    const drag = this.initiativeDrag
+    if (!drag || drag.pointerId !== event.pointerId) return
+    if (drag.handle.hasPointerCapture(event.pointerId)) drag.handle.releasePointerCapture(event.pointerId)
+    drag.handle.removeAttribute('aria-grabbed')
+    drag.row.classList.remove('dragging')
+    this.initiativeDrag = null
+    if (event.type === 'pointercancel') {
+      this.render()
+      return
+    }
+    if (!drag.moved) return
+    const tokenIds = [...this.inspector.querySelectorAll<HTMLElement>('[data-initiative-token-id]')]
+      .map((row) => row.dataset.initiativeTokenId)
+      .filter((tokenId): tokenId is string => Boolean(tokenId))
+    this.store.update((scene) => reorderInitiative(scene, tokenIds))
   }
 
   private onPointerDown(event: PointerEvent): void {
@@ -447,6 +614,7 @@ export class DmApp {
       this.wallPointer = world
       this.renderer.render(this.store.scene, this.camera.snapshot, {
         selectedIds: [...this.selectedIds],
+        activeTokenId: this.store.scene.initiative?.status === 'running' ? this.store.scene.initiative.activeTokenId : null,
         wallDraft: { start: this.wallStart, end: world },
         previewVision: this.previewVision,
       })
@@ -770,6 +938,7 @@ export class DmApp {
       const payload = JSON.parse(await file.text()) as SceneExport
       if (payload.format !== 'live-battle-board' || payload.version !== 1 || !payload.scene) throw new Error('Invalid format')
       await this.database.importAssets(payload.assets ?? [])
+      normalizeInitiative(payload.scene)
       this.clearSelection(); this.store.replace(payload.scene); this.showToast('场景已导入')
     } catch { this.showToast('无法导入：文件格式不正确') }
   }

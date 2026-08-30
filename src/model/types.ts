@@ -68,6 +68,19 @@ export interface Light {
   visibleToPlayers: boolean
 }
 
+export interface InitiativeEntry {
+  tokenId: string
+  initiative: number | null
+  tieBreaker: number
+}
+
+export interface InitiativeState {
+  status: 'setup' | 'running'
+  round: number
+  activeTokenId: string | null
+  entries: InitiativeEntry[]
+}
+
 export interface SceneState {
   version: 1
   id: string
@@ -79,6 +92,7 @@ export interface SceneState {
   tokens: Token[]
   walls: Wall[]
   lights: Light[]
+  initiative?: InitiativeState
   updatedAt: number
 }
 

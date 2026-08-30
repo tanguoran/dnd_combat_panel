@@ -1,4 +1,7 @@
+import { createInitiativeState, sortedInitiativeEntries } from '../core/initiative'
 import type { SceneObject, SceneState, ToolName } from '../model/types'
+
+export type InspectorPanel = 'properties' | 'initiative'
 
 const toolButton = (tool: ToolName, label: string, key: string): string =>
   `<button class="tool" data-tool="${tool}" aria-label="${label}工具">${label}<kbd>${key}</kbd></button>`
@@ -93,11 +96,48 @@ const objectEditor = (selected: SceneObject | undefined, selectionCount: number)
   </section>`
 }
 
+const renderInitiativeBoard = (scene: SceneState, selectedIds: ReadonlySet<string>): string => {
+  const initiative = scene.initiative ?? createInitiativeState()
+  const ordered = sortedInitiativeEntries(initiative)
+  const selectedTokenCount = scene.tokens.filter((token) => selectedIds.has(token.id)).length
+  const rows = ordered.map((entry) => {
+    const token = scene.tokens.find((item) => item.id === entry.tokenId)
+    if (!token) return ''
+    const active = initiative.status === 'running' && initiative.activeTokenId === token.id
+    const safeName = token.name.replaceAll('&', '&amp;').replaceAll('"', '&quot;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
+    const safeColor = /^#[0-9a-f]{6}$/i.test(token.color) ? token.color : '#a9c792'
+    return `<li class="initiative-row ${active ? 'active' : ''}" data-initiative-token-id="${token.id}" data-initiative-score="${entry.initiative ?? 'empty'}">
+      <button class="initiative-drag" data-initiative-drag title="拖动调整同先攻顺序" aria-label="调整 ${safeName} 的平手顺序">⠿</button>
+      <span class="initiative-token" style="--token-color: ${safeColor}" aria-hidden="true">${active ? '▶' : ''}</span>
+      <span class="initiative-name" title="${safeName}">${safeName}</span>
+      <input class="initiative-score" type="number" inputmode="numeric" min="-99" max="999" step="1" value="${entry.initiative ?? ''}" placeholder="—" data-initiative-score-input="${token.id}" aria-label="${safeName} 的先攻值" />
+      <button class="initiative-icon" data-action="initiative-locate" data-token-id="${token.id}" title="在地图上定位" aria-label="定位 ${safeName}">◎</button>
+      <button class="initiative-icon danger" data-action="initiative-remove" data-token-id="${token.id}" title="移出先攻板" aria-label="移出 ${safeName}">×</button>
+    </li>`
+  }).join('')
+
+  return `<section class="initiative-board">
+    <div class="initiative-heading">
+      <div><p class="eyebrow">ENCOUNTER</p><h2>Token 先攻板</h2></div>
+      <span class="round-badge">${initiative.status === 'running' ? `第 ${initiative.round} 轮` : '准备中'}</span>
+    </div>
+    <button class="initiative-add" data-action="initiative-add-selected" ${selectedTokenCount === 0 ? 'disabled' : ''}>＋ 加入已选 Token${selectedTokenCount > 0 ? `（${selectedTokenCount}）` : ''}</button>
+    ${rows ? `<ol class="initiative-list">${rows}</ol>` : `<div class="initiative-empty"><strong>尚未加入 Token</strong><p>在地图上选择一个或多个 Token，然后点击上方按钮。</p></div>`}
+    ${ordered.length > 0 ? '<button class="initiative-clear" data-action="initiative-clear">清空先攻板</button>' : ''}
+    <div class="initiative-controls">
+      ${initiative.status === 'running'
+        ? `<button data-action="initiative-previous">← 上一位</button><button class="primary" data-action="initiative-next">下一位 →</button>`
+        : `<button class="primary wide" data-action="initiative-start" ${ordered.length === 0 ? 'disabled' : ''}>开始战斗</button>`}
+    </div>
+  </section>`
+}
+
 export const renderInspector = (
   host: HTMLElement,
   scene: SceneState,
   selectedIds: ReadonlySet<string>,
   selected?: SceneObject,
+  panel: InspectorPanel = 'properties',
 ): void => {
   const layers = [...scene.images]
     .sort((a, b) => b.zIndex - a.zIndex)
@@ -113,13 +153,18 @@ export const renderInspector = (
 
   host.innerHTML = `
     <div class="scene-heading"><p class="eyebrow">SCENE</p><input class="scene-name" data-scene-property="name" value="${scene.name.replaceAll('"', '&quot;')}" /><p class="muted"><span class="saved-dot"></span> 自动保存</p></div>
-    ${objectEditor(selected, selectedIds.size)}
-    <section><div class="section-title"><h3>图片图层</h3><button data-action="add-image">＋ 添加</button></div>
-      ${layers ? `<ul class="layer-list">${layers}</ul>` : `<button class="empty-layer" data-action="add-image"><span>＋</span><p>拖入或添加图片</p></button>`}
-    </section>
-    <section class="grid-settings"><h3>网格</h3>
-      ${checkbox('grid.visible', '显示网格', scene.grid.visible)}
-      ${numberInput('grid.size', '格子尺寸', scene.grid.size, 20, 300, 5)}
-    </section>
-    <footer><span class="live-dot"></span> LIVE MODE <button data-action="import">导入</button><button data-action="reset">清空</button></footer>`
+    <nav class="inspector-tabs" aria-label="侧栏面板">
+      <button class="${panel === 'properties' ? 'active' : ''}" data-action="panel-properties">属性</button>
+      <button class="${panel === 'initiative' ? 'active' : ''}" data-action="panel-initiative">先攻 <span>${scene.initiative?.entries.length ?? 0}</span></button>
+    </nav>
+    ${panel === 'initiative' ? renderInitiativeBoard(scene, selectedIds) : `
+      ${objectEditor(selected, selectedIds.size)}
+      <section><div class="section-title"><h3>图片图层</h3><button data-action="add-image">＋ 添加</button></div>
+        ${layers ? `<ul class="layer-list">${layers}</ul>` : `<button class="empty-layer" data-action="add-image"><span>＋</span><p>拖入或添加图片</p></button>`}
+      </section>
+      <section class="grid-settings"><h3>网格</h3>
+        ${checkbox('grid.visible', '显示网格', scene.grid.visible)}
+        ${numberInput('grid.size', '格子尺寸', scene.grid.size, 20, 300, 5)}
+      </section>
+      <footer><span class="live-dot"></span> LIVE MODE <button data-action="import">导入</button><button data-action="reset">清空</button></footer>`}`
 }

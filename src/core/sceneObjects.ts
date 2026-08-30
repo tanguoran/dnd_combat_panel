@@ -1,5 +1,6 @@
 import { makeId } from '../model/scene'
 import type { SceneObject, SceneState, Vec2 } from '../model/types'
+import { normalizeInitiative } from './initiative'
 
 export interface SelectionRect {
   start: Vec2
@@ -25,6 +26,7 @@ export const removeSceneObjects = (scene: SceneState, ids: ReadonlySet<string>):
   scene.tokens = scene.tokens.filter((item) => !ids.has(item.id))
   scene.walls = scene.walls.filter((item) => !ids.has(item.id))
   scene.lights = scene.lights.filter((item) => !ids.has(item.id))
+  normalizeInitiative(scene)
 }
 
 export const translateSceneObject = (object: SceneObject, delta: Vec2): void => {

@@ -6,6 +6,7 @@ export type RenderMode = 'dm' | 'player'
 
 interface RenderOptions {
   selectedIds?: string[]
+  activeTokenId?: string | null
   wallDraft?: { start: Vec2; end: Vec2 } | null
   selectionBox?: { start: Vec2; end: Vec2 } | null
   previewVision?: boolean
@@ -79,7 +80,7 @@ export class SceneRenderer {
     this.drawTokens(scene)
     this.drawWalls(scene, options.wallDraft)
     this.drawLights(scene)
-    this.drawSelection(scene, options.selectedIds, options.selectionBox)
+    this.drawSelection(scene, options.selectedIds, options.selectionBox, options.activeTokenId)
     this.applyVision(scene, Boolean(options.previewVision))
     // Background windows can have a throttled ticker. Render the received
     // snapshot immediately so the player display never depends on focus.
@@ -257,10 +258,19 @@ export class SceneRenderer {
     scene: SceneState,
     selectedIds: string[] = [],
     selectionBox?: { start: Vec2; end: Vec2 } | null,
+    activeTokenId?: string | null,
   ): void {
     destroyChildren(this.selectionLayer)
     if (this.mode === 'player') return
     const graphic = new Graphics()
+    const activeToken = scene.tokens.find((token) => token.id === activeTokenId)
+    if (activeToken) {
+      graphic
+        .circle(activeToken.x, activeToken.y, activeToken.radius + 14)
+        .stroke({ color: '#e1b65f', width: 6, alpha: 0.96 })
+        .circle(activeToken.x, activeToken.y, activeToken.radius + 21)
+        .stroke({ color: '#f3d99b', width: 2, alpha: 0.65 })
+    }
     for (const selectedId of selectedIds) {
       const selected =
         scene.images.find((item) => item.id === selectedId) ??
